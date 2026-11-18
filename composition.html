@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fleet Hardware Breakdown</title>
+<script src="https://cdn.jsdelivr.net/gh/tylerscottGT/fleet-hardware-breakdown@v4.0.4/vendor/chart.umd.min.js"></script>
+</head>
+<body style="margin:0;padding:20px;font-family:'Segoe UI',sans-serif;background:#f4f7f9;color:#243133;">
+<div id="zfhb-root" style="max-width:1400px;margin:0 auto;">
+  <h2 style="margin-bottom:20px;color:#00385e;">Fleet Hardware Breakdown</h2>
+  <div style="background:#fff;padding:15px;border-radius:4px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);border-top:3px solid #00385e;">
+    <div style="display:flex;gap:15px;align-items:center;flex-wrap:wrap;">
+      <span id="zfhb-scope" style="color:#555;"></span>
+      <button id="zfhb-export-btn" class="zfhb-btn" disabled>Export assets</button>
+      <button id="zfhb-clear-btn" class="zfhb-btn" style="display:none;">Clear Selection</button>
+      <div id="zfhb-status" style="color:#0072c6;font-weight:bold;margin-left:auto;">Initializing...</div>
+    </div>
+  </div>
+  <div id="zfhb-main" style="display:none;flex-direction:column;gap:20px;">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(300px, 1fr));gap:20px;">
+      <div class="zfhb-card"><h4 style="text-align:center;">Make/Model</h4><canvas id="zfhb-composition-chart"></canvas><div style="text-align:center;margin-top:10px;"><button class="zfhb-link" data-zfhb-summary="zfhb-composition-chart">Download summary (CSV)</button></div></div>
+      <div class="zfhb-card"><h4 style="text-align:center;">Hardware</h4><canvas id="zfhb-hardware-chart"></canvas><div style="text-align:center;margin-top:10px;"><button class="zfhb-link" data-zfhb-summary="zfhb-hardware-chart">Download summary (CSV)</button></div></div>
+      <div class="zfhb-card"><h4 style="text-align:center;">Cameras</h4><canvas id="zfhb-camera-chart"></canvas><div style="text-align:center;margin-top:10px;"><button class="zfhb-link" data-zfhb-summary="zfhb-camera-chart">Download summary (CSV)</button></div></div>
+    </div>
+    <div id="zfhb-details" style="background:#fff;padding:25px;border-radius:4px;display:none;border-left:6px solid #00385e;">
+      <div style="display:flex;align-items:center;gap:15px;">
+        <h4 id="zfhb-selected-label" style="margin:0;color:#00385e;">Select a segment</h4>
+        <button id="zfhb-export-selected-btn" class="zfhb-btn">Export these assets</button>
+      </div>
+      <div id="zfhb-list-note" style="font-size:12px;color:#666;margin-top:8px;display:none;"></div>
+      <div id="zfhb-vehicle-list" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));gap:15px;margin-top:15px;"></div>
+    </div>
+  </div>
+</div>
+<script>
+geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
+  'use strict';
+
+  var PALETTE = ['#00385e', '#00558c', '#0072c6', '#3391d4', '#66b0e2', '#99cff0', '#1f4e79', '#4a7fa8', '#7fa7c9', '#cce7f8'];
+  var OTHER_COLOR = '#b0bec5';
+  var TOP_SLICES = 10;
+  var CARD_LIMIT = 500;
+  var STALE_MS = 5 * 60 * 1000;
+  var COMPANY_GROUP = 'GroupCompanyId';
+  var ASSET_TYPE_ROOT = 'GroupAssetTypeId';
+  var UNASSIGNED = 'Unassigned';
+  var MULTIPLE_TYPES = 'Multiple types';
+  var NO_VIN = 'No VIN';
+  var UNDECODED_VIN = 'Unknown Make/Model';
+  var NO_CAMERA = 'No Camera';
+  var CAMERA_UNAVAILABLE = 'Camera data unavailable';
+  var OTHER = 'Other';
+  var HARDWARE_LABELS = { GoAnywhere: 'GO Anywhere', Gemini: 'GO Anywhere+', None: 'No Device' };
+  var VIN_BATCH_SIZE = 50;
+  var VIN_CACHE_KEY = 'zfhb-vin-cache-v1';
+  var DEVICE_FIELDS = ['id', 'name', 'deviceType', 'productId', 'groups', 'serialNumber', 'isActiveTrackingEnabled',
+    'engineVehicleIdentificationNumber', 'vehicleIdentificationNumber', 'vinInfoMake', 'vinInfoModel'];
+  var CHARTS = [
+    { id: 'zfhb-composition-chart', title: 'Make/Model', key: function (d) { return makeModelOf(d); } },
+    { id: 'zfhb-hardware-chart', title: 'Hardware', key: function (d) { return d._hardware; } },
+    { id: 'zfhb-camera-chart', title: 'Camera', key: function (d) { return d._camera; } }
+  ];
+
+  var STYLES = [
+    '#zfhb-root .zfhb-btn { background:#00385e;color:#fff;border:none;padding:8px 16px;border-radius:2px;cursor:pointer;font-weight:600; }',
+    '#zfhb-root .zfhb-btn:disabled { opacity:0.5;cursor:default; }',
+    '#zfhb-root .zfhb-link { background:none;border:none;padding:0;color:#0072c6;cursor:pointer;font-size:12px;text-decoration:underline; }',
+    '#zfhb-root .zfhb-card { background:#fff;padding:20px;border-radius:4px; }'
+  ].join('\n');
+
+  var api = null;
+  var pageState = null;
+  var devices = [];
+  var groupsById = {};
+  var loadedAt = 0;
+  var loading = null;
+  var visible = [];
+  var charts = {};
+  var chartSlices = {};
+  var hiddenSlices = {};
+  var selection = null;
+
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  // MyGeotab drops <head> styles when it embeds the page, so add them at runtime.
+  function injectStyles() {
+    if (el('zfhb-styles')) return;
+    var style = document.createElement('style');
+    style.id = 'zfhb-styles';
+    style.textContent = STYLES;
+    document.head.appendChild(style);
+  }
+
+  function setStatus(text) {
+    el('zfhb-status').textContent = text;
+  }
+
+  function call(method, params) {
+    return new Promise(function (resolve, reject) {
+      api.call(method, params, resolve, reject);
+    });
+  }
+
+  function isValidVin(vin) {
+    return typeof vin === 'string' && /^[A-HJ-NPR-Z0-9]{17}$/i.test(vin);
+  }
+
+  function deviceVin(d) {
+    var vin = d.engineVehicleIdentificationNumber;
+    return isValidVin(vin) ? vin : (isValidVin(d.vehicleIdentificationNumber) ? d.vehicleIdentificationNumber : null);
+  }
+
+  function makeModelOf(d) {
+    return (d._make + ' ' + d._model).trim();
+  }
+
+  function hardwareOf(d) {
+    return HARDWARE_LABELS[d.deviceType] || d.deviceType;
+  }
+
+  function groupName(id) {
+    var g = groupsById[id];
+    return (g && g.name) || id.replace(/^Group|Id$/g, '');
+  }
+
+  // ---------- Group hierarchy ----------
+
+  function indexGroups(groups) {
+    groupsById = {};
+    groups.forEach(function (g) { g._parents = []; groupsById[g.id] = g; });
+    groups.forEach(function (g) {
+      (g.children || []).forEach(function (c) { if (groupsById[c.id]) groupsById[c.id]._parents.push(g.id); });
+    });
+  }
+
+  function ancestorsOf(id) {
+    var g = groupsById[id];
+    if (!g) return [id];
+    if (g._ancestors) return g._ancestors;
+    g._ancestors = [id];
+    var seen = {};
+    seen[id] = true;
+    g._parents.forEach(function (p) {
+      ancestorsOf(p).forEach(function (a) {
+        if (!seen[a]) { seen[a] = true; g._ancestors.push(a); }
+      });
+    });
+    return g._ancestors;
+  }
+
+  function buildTypeTree() {
+    function node(id, top, path) {
+      var g = groupsById[id];
+      var n = { id: id, name: groupName(id), top: top || null, path: path, children: [] };
+      n.top = n.top || n;
+      (g.children || []).forEach(function (c) {
+        if (groupsById[c.id]) n.children.push(node(c.id, n.top, path.concat(groupName(c.id))));
+      });
+      n.children.sort(function (a, b) { return a.name.localeCompare(b.name); });
+      return n;
+    }
+    var root = groupsById[ASSET_TYPE_ROOT];
+    var typeTree = (root && root.children || []).filter(function (c) { return groupsById[c.id]; })
+      .map(function (c) { return node(c.id, null, []); })
+      .sort(function (a, b) { return a.name.localeCompare(b.name); });
+    var nodes = {};
+    (function walk(list) { list.forEach(function (n) { nodes[n.id] = n; walk(n.children); }); })(typeTree);
+    return nodes;
+  }
+
+  // An asset's type is its deepest Asset Type group; two unrelated type groups means "Multiple types".
+  function classifyType(d, typeNodes) {
+    var ids = (d.groups || []).map(function (g) { return g.id; }).filter(function (id) { return typeNodes[id]; });
+    var deepest = ids.filter(function (id) {
+      return !ids.some(function (other) { return other !== id && ancestorsOf(other).indexOf(id) > -1; });
+    }).filter(function (id, i, arr) { return arr.indexOf(id) === i; });
+    if (!deepest.length) { d._assetType = UNASSIGNED; d._subtype = ''; return; }
+    if (deepest.length > 1) {
+      d._assetType = MULTIPLE_TYPES;
+      d._subtype = deepest.map(function (id) { return typeLabel(typeNodes[id]); }).sort().join('; ');
+      return;
+    }
+    var n = typeNodes[deepest[0]];
+    d._assetType = n.top.name;
+    d._subtype = n.path.join(' › ');
+  }
+
+  function typeLabel(n) {
+    return [n.top.name].concat(n.path).join(' › ');
+  }
+
+  function deviceTypeLabel(d) {
+    if (d._assetType === MULTIPLE_TYPES) return MULTIPLE_TYPES + ' (' + d._subtype + ')';
+    return d._subtype ? d._assetType + ' › ' + d._subtype : d._assetType;
+  }
+
+  function otherGroupNames(d) {
+    var names = (d.groups || []).map(function (g) { return g.id; }).filter(function (id) {
+      return id !== COMPANY_GROUP && ancestorsOf(id).indexOf(ASSET_TYPE_ROOT) === -1;
+    }).map(groupName);
+    return names.sort().join('; ');
+  }
+
+  // ---------- MyGeotab group filter ----------
+
+  function currentGroupFilter() {
+    if (!pageState) return null;
+    try {
+      if (typeof pageState.getAdvancedGroupFilter === 'function') {
+        var adv = pageState.getAdvancedGroupFilter();
+        if (adv) return adv;
+      }
+      if (typeof pageState.getGroupFilter === 'function') {
+        var simple = pageState.getGroupFilter() || [];
+        return { relation: 'Or', groupFilterConditions: simple.map(function (g) { return { groupId: g.id }; }) };
+      }
+    } catch (e) {
+      console.warn('Fleet Hardware Breakdown: could not read the group filter', e);
+    }
+    return null;
+  }
+
+  function matchesFilter(cond, ancestors) {
+    if (!cond) return true;
+    if (cond.groupId) return cond.groupId === COMPANY_GROUP || ancestors[cond.groupId] === true;
+    var list = cond.groupFilterConditions || [];
+    if (!list.length) return true;
+    var isAnd = String(cond.relation).toLowerCase() === 'and';
+    return isAnd
+      ? list.every(function (c) { return matchesFilter(c, ancestors); })
+      : list.some(function (c) { return matchesFilter(c, ancestors); });
+  }
+
+  function filterGroupIds(cond, out) {
+    out = out || [];
+    if (!cond) return out;
+    if (cond.groupId) { if (out.indexOf(cond.groupId) === -1) out.push(cond.groupId); return out; }
+    (cond.groupFilterConditions || []).forEach(function (c) { filterGroupIds(c, out); });
+    return out;
+  }
+
+  function isWholeCompany(cond) {
+    var ids = filterGroupIds(cond);
+    return !ids.length || ids.indexOf(COMPANY_GROUP) > -1 && String(cond.relation).toLowerCase() !== 'and';
+  }
+
+  // ---------- Make/model ----------
+
+  function readVinCache() {
+    try { return JSON.parse(localStorage.getItem(VIN_CACHE_KEY)) || {}; } catch (e) { return {}; }
+  }
+
+  function writeVinCache(cache) {
+    try { localStorage.setItem(VIN_CACHE_KEY, JSON.stringify(cache)); } catch (e) { /* storage full or blocked */ }
+  }
+
+  // Server-side VIN info covers most devices; only the rest go through DecodeVins, in batches, cached per browser.
+  function resolveMakeModels(list) {
+    var cache = readVinCache();
+    var pending = [];
+    list.forEach(function (d) {
+      var vin = deviceVin(d);
+      if (d.vinInfoMake) {
+        d._make = d.vinInfoMake;
+        d._model = d.vinInfoModel || '';
+      } else if (vin && cache[vin]) {
+        d._make = cache[vin].make;
+        d._model = cache[vin].model;
+      } else if (vin) {
+        pending.push(vin);
+      }
+    });
+
+    var vins = pending.filter(function (v, i) { return pending.indexOf(v) === i; });
+    var batches = [];
+    for (var i = 0; i < vins.length; i += VIN_BATCH_SIZE) batches.push(vins.slice(i, i + VIN_BATCH_SIZE));
+
+    var done = 0;
+    return batches.reduce(function (chain, batch) {
+      return chain.then(function () {
+        return call('DecodeVins', { vins: batch }).then(function (results) {
+          (results || []).forEach(function (r) {
+            if (r && r.vin && r.make) cache[r.vin] = { make: r.make, model: r.model || '' };
+          });
+        }).catch(function () { /* leave these VINs undecoded */ }).then(function () {
+          done += batch.length;
+          setStatus('Decoding VINs: ' + done + '/' + vins.length);
+        });
+      });
+    }, Promise.resolve()).then(function () {
+      if (vins.length) writeVinCache(cache);
+      list.forEach(function (d) {
+        if (d._make) return;
+        var vin = deviceVin(d);
+        var hit = vin && cache[vin];
+        d._make = hit ? hit.make : (vin ? UNDECODED_VIN : NO_VIN);
+        d._model = hit ? hit.model : '';
+      });
+    });
+  }
+
+  // ---------- Cameras ----------
+
+  function cameraLabel(c) {
+    var vendor = (c.vendor || '').trim();
+    var model = (c.model || '').trim();
+    if (!model) return vendor || 'Unknown camera';
+    if (!vendor || vendor === 'Geotab' || model.toLowerCase().indexOf(vendor.toLowerCase()) === 0) return model;
+    return vendor + ' ' + model;
+  }
+
+  function assignCameras(list, cameras) {
+    if (!cameras) {
+      list.forEach(function (d) { d._camera = CAMERA_UNAVAILABLE; d._cameraSerial = ''; });
+      return;
+    }
+    var now = Date.now();
+    var bySerial = {};
+    cameras.forEach(function (c) {
+      var from = c.activeFrom ? Date.parse(c.activeFrom) : 0;
+      var to = c.activeTo ? Date.parse(c.activeTo) : Infinity;
+      if (!c.deviceSerialNumber || from > now || to <= now) return;
+      (bySerial[c.deviceSerialNumber] = bySerial[c.deviceSerialNumber] || []).push(c);
+    });
+    list.forEach(function (d) {
+      var paired = (bySerial[d.serialNumber] || []).slice().sort(function (a, b) { return cameraLabel(a).localeCompare(cameraLabel(b)); });
+      d._camera = paired.length ? paired.map(cameraLabel).join(' + ') : NO_CAMERA;
+      d._cameraSerial = paired.map(function (c) { return c.cameraSerialNumber || ''; }).join('; ');
+    });
+  }
+
+  // ---------- Loading ----------
+
+  function load() {
+    if (loading) return loading;
+    setStatus('Loading assets...');
+    var deviceSearch = call('Get', {
+      typeName: 'Device',
+      search: { fromDate: new Date().toISOString() },
+      propertySelector: { fields: DEVICE_FIELDS, isIncluded: true }
+    });
+    var groupSearch = call('Get', { typeName: 'Group' });
+    var cameraSearch = call('Get', { typeName: 'Camera' }).catch(function (err) {
+      console.warn('Fleet Hardware Breakdown: camera data unavailable', err);
+      return null;
+    });
+
+    loading = Promise.all([deviceSearch, groupSearch, cameraSearch]).then(function (results) {
+      indexGroups(results[1]);
+      var typeNodes = buildTypeTree();
+      var list = results[0].filter(function (d) {
+        return d.isActiveTrackingEnabled || (d.serialNumber && d.serialNumber.length > 2);
+      });
+      list.forEach(function (d) {
+        classifyType(d, typeNodes);
+        d._hardware = hardwareOf(d);
+        d._ancestors = {};
+        (d.groups || []).forEach(function (g) {
+          ancestorsOf(g.id).forEach(function (a) { d._ancestors[a] = true; });
+        });
+      });
+      assignCameras(list, results[2]);
+      setStatus('Decoding VINs...');
+      return resolveMakeModels(list).then(function () { return list; });
+    }).then(function (list) {
+      devices = list;
+      loadedAt = Date.now();
+    }).catch(function (err) {
+      setStatus('Error loading assets');
+      console.error('Fleet Hardware Breakdown:', err);
+      throw err;
+    }).then(function () { loading = null; }, function (err) { loading = null; throw err; });
+    return loading;
+  }
+
+  function refresh() {
+    var stale = !loadedAt || Date.now() - loadedAt > STALE_MS;
+    (stale ? load() : Promise.resolve()).then(render, function () { /* status already shows the error */ });
+  }
+
+  // ---------- Rendering ----------
+
+  function render() {
+    var filter = currentGroupFilter();
+    visible = devices.filter(function (d) { return matchesFilter(filter, d._ancestors); });
+
+    el('zfhb-scope').textContent = isWholeCompany(filter)
+      ? 'Showing: Entire company'
+      : 'Showing groups: ' + filterGroupIds(filter).map(groupName).join(', ');
+    el('zfhb-main').style.display = 'flex';
+    el('zfhb-export-btn').disabled = !visible.length;
+    CHARTS.forEach(function (c) { renderChart(c, visible); });
+
+    if (!devices.length) setStatus('No assets found');
+    else if (!visible.length) setStatus('No assets in the selected groups');
+    else setStatus('Ready (' + visible.length + (visible.length === 1 ? ' asset)' : ' assets)'));
+
+    if (selection) {
+      var slice = (chartSlices[selection.chartId] || []).filter(function (s) { return s.label === selection.label; })[0];
+      if (slice) showVehicles(slice, false); else resetSelection();
+    }
+  }
+
+  function groupBy(list, keyFn) {
+    var groups = {};
+    list.forEach(function (d) {
+      var key = keyFn(d);
+      (groups[key] = groups[key] || []).push(d);
+    });
+    return Object.keys(groups).map(function (k) { return { label: k, devices: groups[k] }; })
+      .sort(function (a, b) { return b.devices.length - a.devices.length || a.label.localeCompare(b.label); });
+  }
+
+  function topSlices(all) {
+    if (all.length <= TOP_SLICES + 1) return all;
+    var rest = all.slice(TOP_SLICES);
+    return all.slice(0, TOP_SLICES).concat({
+      label: OTHER,
+      isOther: true,
+      categories: rest.length,
+      devices: rest.reduce(function (acc, s) { return acc.concat(s.devices); }, [])
+    });
+  }
+
+  function renderChart(def, list) {
+    var all = groupBy(list, def.key);
+    var slices = topSlices(all);
+    chartSlices[def.id] = slices;
+    chartSlices[def.id].all = all;
+    if (charts[def.id]) charts[def.id].destroy();
+    charts[def.id] = new Chart(el(def.id).getContext('2d'), {
+      type: 'pie',
+      data: {
+        labels: slices.map(function (s) { return s.isOther ? OTHER + ' (' + s.categories + ' more)' : s.label; }),
+        datasets: [{
+          data: slices.map(function (s) { return s.devices.length; }),
+          backgroundColor: slices.map(function (s, i) { return s.isOther ? OTHER_COLOR : PALETTE[i % PALETTE.length]; })
+        }]
+      },
+      options: {
+        plugins: {
+          legend: {
+            position: 'bottom',
+            onClick: function (e, item, legend) {
+              var label = slices[item.index].label;
+              var hidden = hiddenSlices[def.id] = hiddenSlices[def.id] || {};
+              if (hidden[label]) delete hidden[label]; else hidden[label] = true;
+              legend.chart.toggleDataVisibility(item.index);
+              legend.chart.update();
+            }
+          }
+        },
+        onClick: function (e, elements) {
+          if (!elements.length) return;
+          selection = { chartId: def.id, label: slices[elements[0].index].label };
+          showVehicles(slices[elements[0].index], true);
+        }
+      }
+    });
+    // Slices hidden from the legend stay hidden when the chart is redrawn for a new filter or refresh.
+    var hidden = hiddenSlices[def.id] || {};
+    slices.forEach(function (s, i) { if (hidden[s.label]) charts[def.id].toggleDataVisibility(i); });
+    charts[def.id].update();
+  }
+
+  function showVehicles(slice, scroll) {
+    var container = el('zfhb-details');
+    var listEl = el('zfhb-vehicle-list');
+    var note = el('zfhb-list-note');
+    var list = slice.devices.slice().sort(function (a, b) { return (a.name || '').localeCompare(b.name || ''); });
+    el('zfhb-selected-label').textContent = (slice.isOther ? OTHER + ' (' + slice.categories + ' categories)' : slice.label) +
+      ' (' + list.length + ')';
+    container.style.display = 'block';
+    el('zfhb-clear-btn').style.display = 'block';
+    if (list.length > CARD_LIMIT) {
+      note.textContent = 'Showing the first ' + CARD_LIMIT + ' of ' + list.length + ' assets. Use "Export these assets" for the full list.';
+      note.style.display = 'block';
+    } else {
+      note.style.display = 'none';
+    }
+    listEl.innerHTML = '';
+    list.slice(0, CARD_LIMIT).forEach(function (d) {
+      var item = document.createElement('div');
+      item.style.cssText = 'padding:12px;border:1px solid #e0e6e8;background:#fff;';
+
+      var link = document.createElement('a');
+      link.textContent = d.name || d.id;
+      link.href = '#device,id:' + encodeURIComponent(d.id);
+      link.style.cssText = 'color:#0072c6;font-weight:600;text-decoration:none;display:block;margin-bottom:5px;cursor:pointer;';
+      link.addEventListener('click', function (e) {
+        if (pageState && pageState.gotoPage) {
+          e.preventDefault();
+          pageState.gotoPage('device', { id: d.id });
+        }
+      });
+
+      var meta = document.createElement('div');
+      meta.style.cssText = 'font-size:11px;color:#666;';
+      [
+        'Type: ' + deviceTypeLabel(d),
+        'Make/Model: ' + makeModelOf(d),
+        'Hardware: ' + d._hardware + ' / Camera: ' + d._camera,
+        'VIN: ' + (deviceVin(d) || 'N/A'),
+        'SN: ' + (d.serialNumber || 'N/A')
+      ].forEach(function (line, i) {
+        if (i) meta.appendChild(document.createElement('br'));
+        meta.appendChild(document.createTextNode(line));
+      });
+
+      item.appendChild(link);
+      item.appendChild(meta);
+      listEl.appendChild(item);
+    });
+    if (scroll) container.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  function resetSelection() {
+    selection = null;
+    el('zfhb-details').style.display = 'none';
+    el('zfhb-clear-btn').style.display = 'none';
+  }
+
+  // ---------- CSV export ----------
+
+  function csvCell(value) {
+    var s = value === null || value === undefined ? '' : String(value);
+    if (typeof value === 'string' && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+
+  function downloadCsv(name, rows) {
+    var text = '\ufeff' + rows.map(function (r) { return r.map(csvCell).join(','); }).join('\r\n') + '\r\n';
+    var url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function fileName(part) {
+    var slug = part.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'export';
+    return 'fleet-hardware-' + slug + '-' + new Date().toISOString().slice(0, 10) + '.csv';
+  }
+
+  function exportAssets(list, part) {
+    var rows = [['Name', 'Serial number', 'Asset type', 'Subtype', 'Make', 'Model', 'VIN', 'Hardware', 'Camera', 'Camera serial', 'Groups']];
+    list.slice().sort(function (a, b) { return (a.name || '').localeCompare(b.name || ''); }).forEach(function (d) {
+      rows.push([d.name || d.id, d.serialNumber || '', d._assetType, d._subtype, d._make, d._model, deviceVin(d) || '',
+        d._hardware, d._camera, d._cameraSerial, otherGroupNames(d)]);
+    });
+    downloadCsv(fileName(part), rows);
+  }
+
+  function exportSummary(chartId) {
+    var def = CHARTS.filter(function (c) { return c.id === chartId; })[0];
+    var all = (chartSlices[chartId] && chartSlices[chartId].all) || [];
+    var total = visible.length;
+    var rows = [[def.title, 'Count', 'Percent']];
+    all.forEach(function (s) {
+      rows.push([s.label, s.devices.length, total ? Math.round(s.devices.length / total * 1000) / 10 : 0]);
+    });
+    downloadCsv(fileName(def.title + ' summary'), rows);
+  }
+
+  return {
+    initialize: function (freshApi, state, callback) {
+      api = freshApi;
+      pageState = state;
+      injectStyles();
+      el('zfhb-clear-btn').addEventListener('click', resetSelection);
+      el('zfhb-export-btn').addEventListener('click', function () { exportAssets(visible, 'assets'); });
+      el('zfhb-export-selected-btn').addEventListener('click', function () {
+        var slice = selection && (chartSlices[selection.chartId] || []).filter(function (s) { return s.label === selection.label; })[0];
+        if (slice) exportAssets(slice.devices, slice.label);
+      });
+      document.querySelectorAll('[data-zfhb-summary]').forEach(function (btn) {
+        btn.addEventListener('click', function () { exportSummary(btn.getAttribute('data-zfhb-summary')); });
+      });
+      refresh();
+      callback();
+    },
+    focus: function (freshApi, state) {
+      api = freshApi;
+      pageState = state;
+      refresh();
+    },
+    blur: function () {}
+  };
+};
+</script>
+</body>
+</html>
