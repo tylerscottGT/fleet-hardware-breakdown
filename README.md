@@ -10,10 +10,12 @@ It follows MyGeotab's **Groups** filter at the top of the page, including Asset 
 
 Other features:
 
-- Click a slice to list its assets, with links to each asset.
+- An asset table under the charts, with search (name, serial number, VIN, make/model), sortable columns, 100 rows per page, and links to each asset.
+- A **Communicating** column (Yes/No) from MyGeotab's device status. For more detail, use MyGeotab's Watchdog report.
+- Click a slice to show only its assets in the table.
 - Click a label under a chart to hide that slice.
 - Each chart shows the 10 largest slices plus "Other".
-- CSV exports: all assets in the current view, a summary per chart, or the selected slice.
+- CSV exports: all assets in the current view, a summary per chart, or the table's current results (selected slice and search).
 
 The add-in only reads data. Users see only the assets and groups their MyGeotab account can already see.
 
@@ -26,17 +28,17 @@ The add-in only reads data. Users see only the assets and groups their MyGeotab 
 
 ## Versions and updates
 
-Each release is a git tag (for example `v4.0.4`). The configuration points at one tag through jsDelivr:
+Each release is a git tag (for example `v4.1.0`). The configuration points at one tag through jsDelivr:
 
 ```
-https://cdn.jsdelivr.net/gh/tylerscottGT/fleet-hardware-breakdown@v4.0.4/composition.html
+https://cdn.jsdelivr.net/gh/tylerscottGT/fleet-hardware-breakdown@v4.1.0/composition.html
 ```
 
 To move a database to a new release, update the version and the URL in its add-in configuration. Databases stay on their tag until someone changes them, so work in progress on `main` never reaches users.
 
 ## Requirements
 
-- The user's account needs permission to view assets and groups. Camera data needs camera access. Without it, the camera chart shows "Camera data unavailable" and the rest still works.
+- The user's account needs permission to view assets and groups. Camera data needs camera access. Without it, the camera chart shows "Camera data unavailable" and the rest still works. Likewise, without access to device status the Communicating column shows "Unknown".
 - The browser must be able to reach `cdn.jsdelivr.net`.
 
 ## Files

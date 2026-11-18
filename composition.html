@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Fleet Hardware Breakdown</title>
-<script src="https://cdn.jsdelivr.net/gh/tylerscottGT/fleet-hardware-breakdown@v4.0.4/vendor/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/tylerscottGT/fleet-hardware-breakdown@v4.1.0/vendor/chart.umd.min.js"></script>
 </head>
 <body style="margin:0;padding:20px;font-family:'Segoe UI',sans-serif;background:#f4f7f9;color:#243133;">
 <div id="zfhb-root" style="max-width:1400px;margin:0 auto;">
@@ -22,13 +22,20 @@
       <div class="zfhb-card"><h4 style="text-align:center;">Hardware</h4><canvas id="zfhb-hardware-chart"></canvas><div style="text-align:center;margin-top:10px;"><button class="zfhb-link" data-zfhb-summary="zfhb-hardware-chart">Download summary (CSV)</button></div></div>
       <div class="zfhb-card"><h4 style="text-align:center;">Cameras</h4><canvas id="zfhb-camera-chart"></canvas><div style="text-align:center;margin-top:10px;"><button class="zfhb-link" data-zfhb-summary="zfhb-camera-chart">Download summary (CSV)</button></div></div>
     </div>
-    <div id="zfhb-details" style="background:#fff;padding:25px;border-radius:4px;display:none;border-left:6px solid #00385e;">
-      <div style="display:flex;align-items:center;gap:15px;">
-        <h4 id="zfhb-selected-label" style="margin:0;color:#00385e;">Select a segment</h4>
+    <div id="zfhb-details" style="background:#fff;padding:25px;border-radius:4px;border-left:6px solid #00385e;">
+      <div style="display:flex;align-items:center;gap:15px;flex-wrap:wrap;">
+        <h4 id="zfhb-selected-label" style="margin:0;color:#00385e;">All assets</h4>
+        <input id="zfhb-search" class="zfhb-search" type="search" placeholder="Search name, serial, VIN, make/model..." aria-label="Search assets">
         <button id="zfhb-export-selected-btn" class="zfhb-btn">Export these assets</button>
       </div>
-      <div id="zfhb-list-note" style="font-size:12px;color:#666;margin-top:8px;display:none;"></div>
-      <div id="zfhb-vehicle-list" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));gap:15px;margin-top:15px;"></div>
+      <div style="font-size:12px;color:#666;margin-top:8px;">Click a pie slice to show only its assets. Click a column heading to sort.</div>
+      <div class="zfhb-table-wrap"><table id="zfhb-table" class="zfhb-table"><thead></thead><tbody></tbody></table></div>
+      <div id="zfhb-empty" style="display:none;padding:15px 0;color:#666;"></div>
+      <div id="zfhb-pager" class="zfhb-pager">
+        <button id="zfhb-prev-btn" class="zfhb-link" type="button">‹ Previous</button>
+        <span id="zfhb-page-info" aria-live="polite"></span>
+        <button id="zfhb-next-btn" class="zfhb-link" type="button">Next ›</button>
+      </div>
     </div>
   </div>
 </div>
@@ -39,7 +46,8 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
   var PALETTE = ['#00385e', '#00558c', '#0072c6', '#3391d4', '#66b0e2', '#99cff0', '#1f4e79', '#4a7fa8', '#7fa7c9', '#cce7f8'];
   var OTHER_COLOR = '#b0bec5';
   var TOP_SLICES = 10;
-  var CARD_LIMIT = 500;
+  var PAGE_SIZE = 100;
+  var COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
   var STALE_MS = 5 * 60 * 1000;
   var COMPANY_GROUP = 'GroupCompanyId';
   var ASSET_TYPE_ROOT = 'GroupAssetTypeId';
@@ -50,6 +58,7 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
   var NO_CAMERA = 'No Camera';
   var CAMERA_UNAVAILABLE = 'Camera data unavailable';
   var OTHER = 'Other';
+  var STATUS_UNAVAILABLE = 'Unknown';
   var HARDWARE_LABELS = { GoAnywhere: 'GO Anywhere', Gemini: 'GO Anywhere+', None: 'No Device' };
   var VIN_BATCH_SIZE = 50;
   var VIN_CACHE_KEY = 'zfhb-vin-cache-v1';
@@ -60,12 +69,32 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
     { id: 'zfhb-hardware-chart', title: 'Hardware', key: function (d) { return d._hardware; } },
     { id: 'zfhb-camera-chart', title: 'Camera', key: function (d) { return d._camera; } }
   ];
+  var COLUMNS = [
+    { key: 'name', title: 'Name', value: function (d) { return d.name || d.id; } },
+    { key: 'serial', title: 'Serial number', value: function (d) { return d.serialNumber || ''; } },
+    { key: 'type', title: 'Asset type', value: function (d) { return deviceTypeLabel(d); } },
+    { key: 'makeModel', title: 'Make/Model', value: function (d) { return makeModelOf(d); } },
+    { key: 'hardware', title: 'Hardware', value: function (d) { return d._hardware; } },
+    { key: 'camera', title: 'Camera', value: function (d) { return d._camera; } },
+    { key: 'communicating', title: 'Communicating', value: function (d) { return d._communicating; } },
+    { key: 'groups', title: 'Groups', value: function (d) { return d._groupNames; } }
+  ];
 
   var STYLES = [
     '#zfhb-root .zfhb-btn { background:#00385e;color:#fff;border:none;padding:8px 16px;border-radius:2px;cursor:pointer;font-weight:600; }',
     '#zfhb-root .zfhb-btn:disabled { opacity:0.5;cursor:default; }',
     '#zfhb-root .zfhb-link { background:none;border:none;padding:0;color:#0072c6;cursor:pointer;font-size:12px;text-decoration:underline; }',
-    '#zfhb-root .zfhb-card { background:#fff;padding:20px;border-radius:4px; }'
+    '#zfhb-root .zfhb-link:disabled { color:#999;cursor:default;text-decoration:none; }',
+    '#zfhb-root .zfhb-card { background:#fff;padding:20px;border-radius:4px; }',
+    '#zfhb-root .zfhb-search { flex:1 1 240px;max-width:360px;padding:7px 10px;border:1px solid #c5d0d4;border-radius:2px;font:inherit; }',
+    '#zfhb-root .zfhb-table-wrap { overflow-x:auto;margin-top:15px; }',
+    '#zfhb-root .zfhb-table { width:100%;border-collapse:collapse;font-size:13px; }',
+    '#zfhb-root .zfhb-table th, #zfhb-root .zfhb-table td { padding:8px 10px;border-bottom:1px solid #e0e6e8;text-align:left;vertical-align:top; }',
+    '#zfhb-root .zfhb-table th { background:#f4f7f9;white-space:nowrap; }',
+    '#zfhb-root .zfhb-table th button { background:none;border:none;padding:0;font:inherit;font-weight:600;color:#00385e;cursor:pointer; }',
+    '#zfhb-root .zfhb-table tbody tr:hover { background:#f4f9fd; }',
+    '#zfhb-root .zfhb-table a { color:#0072c6;font-weight:600;text-decoration:none; }',
+    '#zfhb-root .zfhb-pager { display:flex;align-items:center;gap:15px;justify-content:flex-end;margin-top:12px;font-size:12px;color:#555; }'
   ].join('\n');
 
   var api = null;
@@ -79,6 +108,10 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
   var chartSlices = {};
   var hiddenSlices = {};
   var selection = null;
+  var searchText = '';
+  var sortKey = 'name';
+  var sortAsc = true;
+  var page = 0;
 
   function el(id) {
     return document.getElementById(id);
@@ -331,6 +364,19 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
     });
   }
 
+  // ---------- Communication status ----------
+
+  // Assets with no status record have never reported, so they count as not communicating.
+  function assignCommunicating(list, statuses) {
+    if (!statuses) {
+      list.forEach(function (d) { d._communicating = STATUS_UNAVAILABLE; });
+      return;
+    }
+    var online = {};
+    statuses.forEach(function (s) { if (s.device && s.isDeviceCommunicating) online[s.device.id] = true; });
+    list.forEach(function (d) { d._communicating = online[d.id] ? 'Yes' : 'No'; });
+  }
+
   // ---------- Loading ----------
 
   function load() {
@@ -346,8 +392,15 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
       console.warn('Fleet Hardware Breakdown: camera data unavailable', err);
       return null;
     });
+    var statusSearch = call('Get', {
+      typeName: 'DeviceStatusInfo',
+      propertySelector: { fields: ['device', 'isDeviceCommunicating'], isIncluded: true }
+    }).catch(function (err) {
+      console.warn('Fleet Hardware Breakdown: communication status unavailable', err);
+      return null;
+    });
 
-    loading = Promise.all([deviceSearch, groupSearch, cameraSearch]).then(function (results) {
+    loading = Promise.all([deviceSearch, groupSearch, cameraSearch, statusSearch]).then(function (results) {
       indexGroups(results[1]);
       var typeNodes = buildTypeTree();
       var list = results[0].filter(function (d) {
@@ -362,8 +415,15 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
         });
       });
       assignCameras(list, results[2]);
+      assignCommunicating(list, results[3]);
       setStatus('Decoding VINs...');
-      return resolveMakeModels(list).then(function () { return list; });
+      return resolveMakeModels(list).then(function () {
+        list.forEach(function (d) {
+          d._groupNames = otherGroupNames(d);
+          d._search = [d.name, d.serialNumber, deviceVin(d), makeModelOf(d)].join(' ').toLowerCase();
+        });
+        return list;
+      });
     }).then(function (list) {
       devices = list;
       loadedAt = Date.now();
@@ -397,10 +457,12 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
     else if (!visible.length) setStatus('No assets in the selected groups');
     else setStatus('Ready (' + visible.length + (visible.length === 1 ? ' asset)' : ' assets)'));
 
-    if (selection) {
-      var slice = (chartSlices[selection.chartId] || []).filter(function (s) { return s.label === selection.label; })[0];
-      if (slice) showVehicles(slice, false); else resetSelection();
-    }
+    if (selection && !selectedSlice()) selection = null;
+    renderTable();
+  }
+
+  function selectedSlice() {
+    return selection && (chartSlices[selection.chartId] || []).filter(function (s) { return s.label === selection.label; })[0];
   }
 
   function groupBy(list, keyFn) {
@@ -455,7 +517,9 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
         onClick: function (e, elements) {
           if (!elements.length) return;
           selection = { chartId: def.id, label: slices[elements[0].index].label };
-          showVehicles(slices[elements[0].index], true);
+          page = 0;
+          renderTable();
+          el('zfhb-details').scrollIntoView({ behavior: 'smooth' });
         }
       }
     });
@@ -465,61 +529,109 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
     charts[def.id].update();
   }
 
-  function showVehicles(slice, scroll) {
-    var container = el('zfhb-details');
-    var listEl = el('zfhb-vehicle-list');
-    var note = el('zfhb-list-note');
-    var list = slice.devices.slice().sort(function (a, b) { return (a.name || '').localeCompare(b.name || ''); });
-    el('zfhb-selected-label').textContent = (slice.isOther ? OTHER + ' (' + slice.categories + ' categories)' : slice.label) +
-      ' (' + list.length + ')';
-    container.style.display = 'block';
-    el('zfhb-clear-btn').style.display = 'block';
-    if (list.length > CARD_LIMIT) {
-      note.textContent = 'Showing the first ' + CARD_LIMIT + ' of ' + list.length + ' assets. Use "Export these assets" for the full list.';
-      note.style.display = 'block';
-    } else {
-      note.style.display = 'none';
-    }
-    listEl.innerHTML = '';
-    list.slice(0, CARD_LIMIT).forEach(function (d) {
-      var item = document.createElement('div');
-      item.style.cssText = 'padding:12px;border:1px solid #e0e6e8;background:#fff;';
+  // ---------- Asset table ----------
 
-      var link = document.createElement('a');
-      link.textContent = d.name || d.id;
-      link.href = '#device,id:' + encodeURIComponent(d.id);
-      link.style.cssText = 'color:#0072c6;font-weight:600;text-decoration:none;display:block;margin-bottom:5px;cursor:pointer;';
-      link.addEventListener('click', function (e) {
-        if (pageState && pageState.gotoPage) {
-          e.preventDefault();
-          pageState.gotoPage('device', { id: d.id });
-        }
+  function tableRows() {
+    var slice = selectedSlice();
+    var base = slice ? slice.devices : visible;
+    var terms = searchText.toLowerCase().split(/\s+/).filter(Boolean);
+    var rows = terms.length
+      ? base.filter(function (d) { return terms.every(function (t) { return d._search.indexOf(t) > -1; }); })
+      : base.slice();
+    var col = COLUMNS.filter(function (c) { return c.key === sortKey; })[0] || COLUMNS[0];
+    var dir = sortAsc ? 1 : -1;
+    return rows.map(function (d) { return { d: d, key: String(col.value(d)), name: d.name || '' }; })
+      .sort(function (a, b) { return dir * COLLATOR.compare(a.key, b.key) || COLLATOR.compare(a.name, b.name); })
+      .map(function (r) { return r.d; });
+  }
+
+  function selectionTitle() {
+    var slice = selectedSlice();
+    if (!slice) return 'All assets';
+    return slice.isOther ? OTHER + ' (' + slice.categories + ' categories)' : slice.label;
+  }
+
+  function buildHeader() {
+    var tr = document.createElement('tr');
+    COLUMNS.forEach(function (c) {
+      var th = document.createElement('th');
+      th.setAttribute('scope', 'col');
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.addEventListener('click', function () {
+        if (sortKey === c.key) sortAsc = !sortAsc; else { sortKey = c.key; sortAsc = true; }
+        page = 0;
+        renderTable();
       });
-
-      var meta = document.createElement('div');
-      meta.style.cssText = 'font-size:11px;color:#666;';
-      [
-        'Type: ' + deviceTypeLabel(d),
-        'Make/Model: ' + makeModelOf(d),
-        'Hardware: ' + d._hardware + ' / Camera: ' + d._camera,
-        'VIN: ' + (deviceVin(d) || 'N/A'),
-        'SN: ' + (d.serialNumber || 'N/A')
-      ].forEach(function (line, i) {
-        if (i) meta.appendChild(document.createElement('br'));
-        meta.appendChild(document.createTextNode(line));
-      });
-
-      item.appendChild(link);
-      item.appendChild(meta);
-      listEl.appendChild(item);
+      th.appendChild(btn);
+      tr.appendChild(th);
+      c.th = th;
+      c.btn = btn;
     });
-    if (scroll) container.scrollIntoView({ behavior: 'smooth' });
+    el('zfhb-table').tHead.appendChild(tr);
+  }
+
+  function updateHeader() {
+    COLUMNS.forEach(function (c) {
+      var active = c.key === sortKey;
+      c.btn.textContent = c.title + (active ? (sortAsc ? ' ▲' : ' ▼') : '');
+      if (active) c.th.setAttribute('aria-sort', sortAsc ? 'ascending' : 'descending'); else c.th.removeAttribute('aria-sort');
+    });
+  }
+
+  function assetLink(d) {
+    var link = document.createElement('a');
+    link.textContent = d.name || d.id;
+    link.href = '#device,id:' + encodeURIComponent(d.id);
+    link.addEventListener('click', function (e) {
+      if (pageState && pageState.gotoPage) {
+        e.preventDefault();
+        pageState.gotoPage('device', { id: d.id });
+      }
+    });
+    return link;
+  }
+
+  function renderTable() {
+    var rows = tableRows();
+    var pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+    page = Math.min(page, pages - 1);
+    var first = page * PAGE_SIZE;
+    var shown = rows.slice(first, first + PAGE_SIZE);
+
+    el('zfhb-selected-label').textContent = selectionTitle() + ' (' + rows.length +
+      (searchText.trim() ? ' matching' : '') + ')';
+    el('zfhb-clear-btn').style.display = selection ? 'block' : 'none';
+    el('zfhb-export-selected-btn').disabled = !rows.length;
+
+    updateHeader();
+    var tbody = el('zfhb-table').tBodies[0];
+    tbody.innerHTML = '';
+    var frag = document.createDocumentFragment();
+    shown.forEach(function (d) {
+      var tr = document.createElement('tr');
+      COLUMNS.forEach(function (c) {
+        var td = document.createElement('td');
+        if (c.key === 'name') td.appendChild(assetLink(d)); else td.textContent = c.value(d);
+        tr.appendChild(td);
+      });
+      frag.appendChild(tr);
+    });
+    tbody.appendChild(frag);
+
+    var empty = el('zfhb-empty');
+    empty.style.display = rows.length ? 'none' : 'block';
+    empty.textContent = searchText.trim() ? 'No assets match "' + searchText.trim() + '".' : 'No assets to show.';
+    el('zfhb-pager').style.display = rows.length > PAGE_SIZE ? 'flex' : 'none';
+    el('zfhb-page-info').textContent = rows.length ? (first + 1) + '–' + (first + shown.length) + ' of ' + rows.length : '';
+    el('zfhb-prev-btn').disabled = page === 0;
+    el('zfhb-next-btn').disabled = page >= pages - 1;
   }
 
   function resetSelection() {
     selection = null;
-    el('zfhb-details').style.display = 'none';
-    el('zfhb-clear-btn').style.display = 'none';
+    page = 0;
+    renderTable();
   }
 
   // ---------- CSV export ----------
@@ -548,11 +660,16 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
     return 'fleet-hardware-' + slug + '-' + new Date().toISOString().slice(0, 10) + '.csv';
   }
 
+  function byName(a, b) {
+    return (a.name || '').localeCompare(b.name || '');
+  }
+
   function exportAssets(list, part) {
-    var rows = [['Name', 'Serial number', 'Asset type', 'Subtype', 'Make', 'Model', 'VIN', 'Hardware', 'Camera', 'Camera serial', 'Groups']];
-    list.slice().sort(function (a, b) { return (a.name || '').localeCompare(b.name || ''); }).forEach(function (d) {
+    var rows = [['Name', 'Serial number', 'Asset type', 'Subtype', 'Make', 'Model', 'VIN', 'Hardware', 'Camera', 'Camera serial',
+      'Communicating', 'Groups']];
+    list.forEach(function (d) {
       rows.push([d.name || d.id, d.serialNumber || '', d._assetType, d._subtype, d._make, d._model, deviceVin(d) || '',
-        d._hardware, d._camera, d._cameraSerial, otherGroupNames(d)]);
+        d._hardware, d._camera, d._cameraSerial, d._communicating, d._groupNames]);
     });
     downloadCsv(fileName(part), rows);
   }
@@ -573,11 +690,21 @@ geotab.addin['zenith-fleet-hardware-breakdown'] = function () {
       api = freshApi;
       pageState = state;
       injectStyles();
+      buildHeader();
       el('zfhb-clear-btn').addEventListener('click', resetSelection);
-      el('zfhb-export-btn').addEventListener('click', function () { exportAssets(visible, 'assets'); });
+      el('zfhb-search').addEventListener('input', function (e) {
+        searchText = e.target.value;
+        page = 0;
+        if (devices.length) renderTable();
+      });
+      el('zfhb-prev-btn').addEventListener('click', function () { page--; renderTable(); });
+      el('zfhb-next-btn').addEventListener('click', function () { page++; renderTable(); });
+      el('zfhb-export-btn').addEventListener('click', function () { exportAssets(visible.slice().sort(byName), 'assets'); });
+      // Exports every row matching the selected slice and search, in the table's sort order, not just the current page.
       el('zfhb-export-selected-btn').addEventListener('click', function () {
-        var slice = selection && (chartSlices[selection.chartId] || []).filter(function (s) { return s.label === selection.label; })[0];
-        if (slice) exportAssets(slice.devices, slice.label);
+        var slice = selectedSlice();
+        var part = (slice ? slice.label : 'assets') + (searchText.trim() ? ' ' + searchText.trim() : '');
+        exportAssets(tableRows(), part);
       });
       document.querySelectorAll('[data-zfhb-summary]').forEach(function (btn) {
         btn.addEventListener('click', function () { exportSummary(btn.getAttribute('data-zfhb-summary')); });

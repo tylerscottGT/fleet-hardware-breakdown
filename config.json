@@ -1,10 +1,10 @@
 {
     "name": "Zenith Fleet Hardware Breakdown",
     "supportEmail": "https://github.com/tylerscottGT/fleet-hardware-breakdown",
-    "version": "4.0.4",
+    "version": "4.1.0",
     "items": [
         {
-            "url": "https://cdn.jsdelivr.net/gh/tylerscottGT/fleet-hardware-breakdown@v4.0.4/composition.html",
+            "url": "https://cdn.jsdelivr.net/gh/tylerscottGT/fleet-hardware-breakdown@v4.1.0/composition.html",
             "path": "ActivityLink",
             "menuName": {
                 "en": "Fleet Hardware Breakdown"
